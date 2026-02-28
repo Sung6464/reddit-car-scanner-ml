@@ -6,7 +6,7 @@ env/
 
 # Secrets
 *.json
-.env
+.#env
 
 # OS
 .DS_Store

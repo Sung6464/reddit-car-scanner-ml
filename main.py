@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 # IMPORTANT: Replace with the actual path to your downloaded Firebase Service Account Key JSON file
-FIREBASE_SERVICE_ACCOUNT_KEY_PATH = "carscannerml-firebase-adminsdk-fbsvc-b326a77ae3.json" # <--- REPLACE THIS
+FIREBASE_SERVICE_ACCOUNT_KEY_PATH = "carscannerml-firebase-adminsdk-fbsvc-66a4fb8aa6.json" # <--- REPLACE THIS
 
 # Define a user ID for Firestore data paths. In a multi-user app, this would come from authentication.
 USER_ID = "car_scanner_user_123"
