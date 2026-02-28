@@ -1,32 +1,32 @@
 import re
-import json
 import os
 import time
 import logging
-import praw # Ensure praw is installed
-from transformers import pipeline # Ensure transformers is installed
+import praw
+from transformers import pipeline
+from dotenv import load_dotenv
 
 # Firebase imports
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 
+# --- Load Environment Variables ---
+load_dotenv()
+
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-# IMPORTANT: Replace with the actual path to your downloaded Firebase Service Account Key JSON file
-FIREBASE_SERVICE_ACCOUNT_KEY_PATH = "carscannerml-firebase-adminsdk-fbsvc-66a4fb8aa6.json" # <--- REPLACE THIS
-
-# Define a user ID for Firestore data paths. In a multi-user app, this would come from authentication.
+FIREBASE_SERVICE_ACCOUNT_KEY_PATH = os.getenv("FIREBASE_KEY_PATH")
 USER_ID = "car_scanner_user_123"
 APP_ID = "reddit_car_scanner_app"
 
 SUBREDDITS_TO_SCAN = [
     "CarsIndia", "IndianGaming", "india", "AskIndia", "cars",
-    "whatcarshouldibuy", "usedcars", "electricvehicles", "ev",
-    "Autos", "mechanicadvice", "carbuyingsharing"
+    "whatcarshouldibuy", "usedcars", "electricvehicles",
+    "Autos", "mechanicadvice"
 ]
 
 INCLUSION_KEYWORDS = [
@@ -55,8 +55,8 @@ CANDIDATE_LABELS = [
 ]
 
 ML_CONFIDENCE_THRESHOLD = 0.75
-SCAN_INTERVAL_SECONDS = 3600 # Scan every 1 hour (3600 seconds)
-POST_FETCH_LIMIT = 50 # Number of new posts to fetch per subreddit per scan
+SCAN_INTERVAL_SECONDS = 3600
+POST_FETCH_LIMIT = 50
 
 # --- Text Preprocessing ---
 def preprocess_text(text):
@@ -87,18 +87,23 @@ def passes_keyword_filter(text, inclusion_keywords, exclusion_keywords):
 
     return True
 
-# --- Firebase Initialization & Functions ---
+# --- Firebase Initialization ---
 db = None
 try:
+    if not FIREBASE_SERVICE_ACCOUNT_KEY_PATH:
+        raise ValueError("FIREBASE_KEY_PATH not set in .env file")
+    if not os.path.exists(FIREBASE_SERVICE_ACCOUNT_KEY_PATH):
+        raise FileNotFoundError(f"Firebase key file not found at: {FIREBASE_SERVICE_ACCOUNT_KEY_PATH}")
     if not firebase_admin._apps:
         cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_KEY_PATH)
         firebase_admin.initialize_app(cred)
     db = firestore.client()
     logger.info("Firebase initialized successfully.")
 except Exception as e:
-    logger.error(f"Error initializing Firebase: {e}. Please check your service account key path.")
+    logger.error(f"Error initializing Firebase: {e}")
     db = None
 
+# --- Firebase Helper Functions ---
 def get_processed_posts_collection():
     if db:
         return db.collection('artifacts').document(APP_ID).collection('users').document(USER_ID).collection('processed_car_posts')
@@ -136,14 +141,14 @@ def save_relevant_post(post_data):
         logger.warning("Firestore not initialized. Cannot save relevant post.")
         return
     try:
-        doc_id = post_data['id'] # Use Reddit's ID directly as Firestore doc ID
+        doc_id = post_data['id']
         relevant_posts_col = get_relevant_posts_collection()
         relevant_posts_col.document(doc_id).set({
             'title': post_data['title'],
             'selftext': post_data['selftext'],
             'subreddit': post_data['subreddit'],
             'url': f"https://www.reddit.com{post_data['url']}",
-            'author_username': post_data.get('author_username', '[deleted]'), # Added author
+            'author_username': post_data.get('author_username', '[deleted]'),
             'ml_score': post_data.get('ml_score'),
             'ml_label': post_data.get('ml_label'),
             'found_at': firestore.SERVER_TIMESTAMP
@@ -169,8 +174,7 @@ def save_relevant_comment(parent_post_id, comment_data):
         }, merge=True)
         logger.info(f"  Saved relevant comment to Firestore (Post ID: {parent_post_id}): {comment_data['body'][:50]}...")
     except Exception as e:
-        logger.error(f"Error saving relevant comment to Firestore (Post ID: {parent_post_id}): {comment_data.get('body', 'N/A')}: {e}")
-
+        logger.error(f"Error saving relevant comment to Firestore (Post ID: {parent_post_id}): {e}")
 
 # --- ML Model Initialization ---
 classifier = None
@@ -182,19 +186,27 @@ except Exception as e:
     logger.error(f"Error loading ML model: {e}. ML filtering will be skipped.")
     classifier = None
 
-# --- REAL REDDIT API FETCHING ---
+# --- Reddit Initialization ---
 reddit = None
 try:
+    client_id = os.getenv("REDDIT_CLIENT_ID")
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+    user_agent = os.getenv("REDDIT_USER_AGENT")
+
+    if not all([client_id, client_secret, user_agent]):
+        raise ValueError("Reddit credentials not fully set in .env file. Check REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT.")
+
     reddit = praw.Reddit(
-        client_id="jj4zF8-CRlgBeuFtwdy_fg", # <--- ENSURE QUOTATION MARKS HERE
-        client_secret="cTNHzxG6Rrs_AeleZ6M5T2Bt39bwKg", # <--- ENSURE QUOTATION MARKS HERE
-        user_agent="CarScannerML/1.0 (by /u/No-Reveal9910)" # <--- ENSURE QUOTATION MARKS HERE
+        client_id=client_id,
+        client_secret=client_secret,
+        user_agent=user_agent
     )
     logger.info("PRAW initialized successfully.")
 except Exception as e:
-    logger.error(f"Error initializing PRAW: {e}. Please check your credentials.")
+    logger.error(f"Error initializing PRAW: {e}")
     reddit = None
 
+# --- Reddit Post Fetching ---
 def fetch_reddit_posts(subreddit_list, num_posts_per_subreddit):
     if reddit is None:
         logger.warning("PRAW not initialized. Skipping real data fetch.")
@@ -216,34 +228,29 @@ def fetch_reddit_posts(subreddit_list, num_posts_per_subreddit):
                             "selftext": submission.selftext,
                             "subreddit": submission.subreddit.display_name,
                             "url": submission.permalink,
-                            "author_username": submission.author.name if submission.author else '[deleted]', # Get post author
-                            "comments": [] # Initialize comments list
+                            "author_username": submission.author.name if submission.author else '[deleted]',
+                            "comments": []
                         }
 
-                        # --- Fetch Comments for the current submission ---
-                        # PRAW's replace_more() can be intensive. Limit to 0 to expand all MoreComments.
-                        # Be cautious with large numbers of comments; this can hit API limits quickly.
                         try:
-                            submission.comments.replace_more(limit=None) # Fetch all comments
+                            submission.comments.replace_more(limit=None)
                             for comment in submission.comments.list():
-                                if comment.author: # Exclude comments from deleted users
+                                if comment.author:
                                     post_data["comments"].append({
                                         "id": comment.id,
                                         "body": comment.body,
                                         "author_username": comment.author.name,
-                                        "permalink": comment.permalink # Store comment's permalink
+                                        "permalink": comment.permalink
                                     })
                         except Exception as e:
                             logger.error(f"    Error fetching comments for post {post_id}: {e}")
-                            # Continue even if comments fail to fetch for a post
-                        # --- End Fetch Comments ---
 
                         all_fetched_posts.append(post_data)
                     add_processed_post(post_id)
                 else:
                     logger.debug(f"Post {post_id} from r/{sub_name} already processed.")
             logger.info(f"  Processed new posts from r/{sub_name}.")
-            time.sleep(1) # Be polite to Reddit API, 1 second delay between subreddits
+            time.sleep(1)
         except Exception as e:
             logger.error(f"  Error fetching posts from r/{sub_name}: {e}")
             continue
@@ -251,14 +258,13 @@ def fetch_reddit_posts(subreddit_list, num_posts_per_subreddit):
     logger.info(f"Finished fetching. Total new candidate posts found: {len(all_fetched_posts)}")
     return all_fetched_posts
 
-
-# --- ML Filtering Logic for Posts and Comments ---
+# --- ML Filtering ---
 def apply_ml_filter_to_text(text):
     if classifier is None:
         return {'label': 'ML_Skipped', 'score': 0.0, 'relevant': False}
 
     processed_text = preprocess_text(text)
-    if not processed_text: # Handle empty text after preprocessing
+    if not processed_text:
         return {'label': 'Empty_Text', 'score': 0.0, 'relevant': False}
 
     try:
@@ -276,11 +282,10 @@ def apply_ml_filter_to_text(text):
 
         return {'label': top_label, 'score': float(top_score), 'relevant': is_relevant}
     except Exception as e:
-        logger.error(f"Error during ML inference for text: {text[:50]}... : {e}")
+        logger.error(f"Error during ML inference: {e}")
         return {'label': 'ML_Error', 'score': 0.0, 'relevant': False}
 
-
-# --- Main Continuous Scanning Logic ---
+# --- Main Scanning Loop ---
 def run_continuous_car_scanner():
     logger.info("Starting Reddit Car Market Scanner in continuous mode.")
     logger.info(f"Scanning every {SCAN_INTERVAL_SECONDS / 60} minutes.")
@@ -289,16 +294,13 @@ def run_continuous_car_scanner():
         try:
             logger.info(f"\n--- Initiating new scan cycle ({time.ctime()}) ---")
 
-            # Phase 2: Data Collection & Initial Keyword Filtering
             all_raw_posts = fetch_reddit_posts(SUBREDDITS_TO_SCAN, num_posts_per_subreddit=POST_FETCH_LIMIT)
             logger.info(f"Total new posts fetched in this cycle: {len(all_raw_posts)}")
 
             keyword_filtered_posts = []
             logger.info("Applying keyword filter (Phase 2) to posts...")
             for post in all_raw_posts:
-                title_text = post.get('title', '')
-                self_text = post.get('selftext', '')
-                combined_text = f"{title_text} {self_text}"
+                combined_text = f"{post.get('title', '')} {post.get('selftext', '')}"
                 processed_text = preprocess_text(combined_text)
 
                 if passes_keyword_filter(processed_text, INCLUSION_KEYWORDS, EXCLUSION_KEYWORDS):
@@ -308,12 +310,10 @@ def run_continuous_car_scanner():
 
             logger.info(f"Found {len(keyword_filtered_posts)} posts passing initial keyword filter.")
 
-            # Phase 3: Advanced ML Filtering for Posts and Comments
             current_cycle_relevant_posts_count = 0
             logger.info("Starting Advanced ML Filtering (Phase 3) for posts and comments...")
 
             for post in keyword_filtered_posts:
-                # Apply ML filter to the main post
                 post_ml_result = apply_ml_filter_to_text(f"{post['title']} {post['selftext']}")
                 post['ml_label'] = post_ml_result['label']
                 post['ml_score'] = post_ml_result['score']
@@ -326,29 +326,25 @@ def run_continuous_car_scanner():
                 else:
                     logger.debug(f"  [ML SKIPPED POST - {post_ml_result['label']} ({post_ml_result['score']:.2f})]: {post['title']}")
 
-                # --- Process Comments for this post ---
-                if post_is_relevant or True: # Optionally process comments even if post isn't top-level relevant
-                                            # For now, process all comments on keyword-filtered posts for more detail
-                    relevant_comments_for_post = []
-                    for comment_data in post.get('comments', []):
-                        comment_ml_result = apply_ml_filter_to_text(comment_data['body'])
-                        comment_data['ml_label'] = comment_ml_result['label']
-                        comment_data['ml_score'] = comment_ml_result['score']
+                relevant_comments_for_post = []
+                for comment_data in post.get('comments', []):
+                    comment_ml_result = apply_ml_filter_to_text(comment_data['body'])
+                    comment_data['ml_label'] = comment_ml_result['label']
+                    comment_data['ml_score'] = comment_ml_result['score']
 
-                        if comment_ml_result['relevant']:
-                            relevant_comments_for_post.append(comment_data)
-                            save_relevant_comment(post['id'], comment_data)
-                            logger.info(f"    [ML PASSED COMMENT - {comment_ml_result['label']} ({comment_ml_result['score']:.2f})]: {comment_data['body'][:50]}...")
-                        else:
-                            logger.debug(f"    [ML SKIPPED COMMENT - {comment_ml_result['label']} ({comment_ml_result['score']:.2f})]: {comment_data['body'][:50]}...")
-                    if relevant_comments_for_post:
-                        logger.info(f"  Found {len(relevant_comments_for_post)} relevant comments for post: {post['title']}")
-                time.sleep(0.5) # Small delay after processing comments for a post
+                    if comment_ml_result['relevant']:
+                        relevant_comments_for_post.append(comment_data)
+                        save_relevant_comment(post['id'], comment_data)
+                        logger.info(f"    [ML PASSED COMMENT - {comment_ml_result['label']} ({comment_ml_result['score']:.2f})]: {comment_data['body'][:50]}...")
+                    else:
+                        logger.debug(f"    [ML SKIPPED COMMENT - {comment_ml_result['label']} ({comment_ml_result['score']:.2f})]: {comment_data['body'][:50]}...")
 
-            logger.info(f"Found {current_cycle_relevant_posts_count} genuinely relevant posts (top-level) in this cycle after all filters.")
-            # Note: This count only reflects top-level posts that passed all filters, not comments.
-            # You can add separate counters for relevant comments if needed.
+                if relevant_comments_for_post:
+                    logger.info(f"  Found {len(relevant_comments_for_post)} relevant comments for post: {post['title']}")
 
+                time.sleep(0.5)
+
+            logger.info(f"Found {current_cycle_relevant_posts_count} genuinely relevant posts in this cycle.")
             logger.info(f"Scan cycle complete. Waiting {SCAN_INTERVAL_SECONDS} seconds for next cycle...")
             time.sleep(SCAN_INTERVAL_SECONDS)
 
@@ -357,13 +353,14 @@ def run_continuous_car_scanner():
             break
         except Exception as e:
             logger.critical(f"An unhandled error occurred during scan cycle: {e}. Retrying after delay.", exc_info=True)
-            time.sleep(60) # Wait 1 minute before retrying on critical error
+            time.sleep(60)
 
 if __name__ == "__main__":
-    if not os.path.exists(FIREBASE_SERVICE_ACCOUNT_KEY_PATH):
+    if not FIREBASE_SERVICE_ACCOUNT_KEY_PATH:
+        logger.critical("FIREBASE_KEY_PATH not found in .env file. Please set it and try again.")
+    elif not os.path.exists(FIREBASE_SERVICE_ACCOUNT_KEY_PATH):
         logger.critical(f"Firebase Service Account Key not found at: {FIREBASE_SERVICE_ACCOUNT_KEY_PATH}")
-        logger.critical("Please download it from Firebase Console (Project settings -> Service accounts) and place it in your project folder.")
-        logger.critical("Update FIREBASE_SERVICE_ACCOUNT_KEY_PATH in the script accordingly.")
+        logger.critical("Please download it from Firebase Console and update your .env file.")
     else:
         run_continuous_car_scanner()
 
