@@ -180,7 +180,7 @@ def save_relevant_comment(parent_post_id, comment_data):
 classifier = None
 try:
     logger.info("Loading pre-trained ML model (facebook/bart-large-mnli)... This may take a moment on first run.")
-    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+    classifier = pipeline("zero-shot-classification", model="cross-encoder/nli-MiniLM2-L6-H768")
     logger.info("ML model loaded successfully.")
 except Exception as e:
     logger.error(f"Error loading ML model: {e}. ML filtering will be skipped.")
